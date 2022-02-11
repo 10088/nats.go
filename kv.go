@@ -159,6 +159,16 @@ type KeyValueConfig struct {
 	MaxBytes     int64
 	Storage      StorageType
 	Replicas     int
+
+	// This is for the maintenance PurgeDeletes() function. Normally, when
+	// this function is invoked, keys that have a delete or purge marker
+	// as the last entry see all their entries removed, including the
+	// marker. This option allows to delete old data but keep the marker
+	// if its timestamp is not older than this value. If this option
+	// is not specified, the API will pick a default of 30 minutes.
+	// Explicitly set it to a negative value to restore previous behavior
+	// to delete markers, regardless their age.
+	PurgeDeletesMarkerThreshold time.Duration
 }
 
 // Used to watch all keys.
@@ -324,6 +334,7 @@ func (js *js) CreateKeyValue(cfg *KeyValueConfig) (KeyValue, error) {
 		stream: scfg.Name,
 		pre:    fmt.Sprintf(kvSubjectsPreTmpl, cfg.Bucket),
 		js:     js,
+		pdthr:  cfg.PurgeDeletesMarkerThreshold,
 	}
 	return kv, nil
 }
@@ -342,6 +353,7 @@ type kvs struct {
 	stream string
 	pre    string
 	js     *js
+	pdthr  time.Duration
 }
 
 // Underlying entry.
@@ -536,6 +548,8 @@ func (kv *kvs) delete(key string, purge bool) error {
 	return err
 }
 
+const kvDefaultPurgeDeletesMarkerThreshold = 30 * time.Minute
+
 // PurgeDeletes will remove all current delete markers.
 // This is a maintenance option if there is a larger buildup of delete markers.
 func (kv *kvs) PurgeDeletes(opts ...WatchOpt) error {
@@ -544,6 +558,17 @@ func (kv *kvs) PurgeDeletes(opts ...WatchOpt) error {
 		return err
 	}
 	defer watcher.Stop()
+
+	var limit time.Time
+	olderThan := kv.pdthr
+	// Negative value is used to instruct to always remove markers, regardless
+	// of age. If set to 0 (or not set), use our default value.
+	if olderThan == 0 {
+		olderThan = kvDefaultPurgeDeletesMarkerThreshold
+	}
+	if olderThan > 0 {
+		limit = time.Now().Add(-olderThan)
+	}
 
 	var deleteMarkers []KeyValueEntry
 	for entry := range watcher.Updates() {
@@ -564,8 +589,11 @@ func (kv *kvs) PurgeDeletes(opts ...WatchOpt) error {
 		b.WriteString(kv.pre)
 		b.WriteString(entry.Key())
 		pr.Subject = b.String()
-		err := kv.js.purgeStream(kv.stream, &pr)
-		if err != nil {
+		pr.Keep = 0
+		if olderThan > 0 && entry.Created().After(limit) {
+			pr.Keep = 1
+		}
+		if err := kv.js.purgeStream(kv.stream, &pr); err != nil {
 			return err
 		}
 		b.Reset()

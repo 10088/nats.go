@@ -400,7 +400,11 @@ func TestKeyValueDeleteTombstones(t *testing.T) {
 	nc, js := jsClient(t, s)
 	defer nc.Close()
 
-	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: "KVS", History: 10})
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:                      "KVS",
+		History:                     10,
+		PurgeDeletesMarkerThreshold: -1, // Set negative to remove all markers, regardless of age
+	})
 	expectOk(t, err)
 
 	put := func(key, value string) {
@@ -427,6 +431,56 @@ func TestKeyValueDeleteTombstones(t *testing.T) {
 	expectOk(t, err)
 	if si.State.Msgs != 0 {
 		t.Fatalf("Expected no stream msgs to be left, got %d", si.State.Msgs)
+	}
+}
+
+func TestKeyValuePurgeDeletesMarkerThreshold(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer shutdownJSServerAndRemoveStorage(t, s)
+
+	nc, js := jsClient(t, s)
+	defer nc.Close()
+
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:                      "KVS",
+		History:                     10,
+		PurgeDeletesMarkerThreshold: 100 * time.Millisecond,
+	})
+	expectOk(t, err)
+
+	put := func(key, value string) {
+		t.Helper()
+		_, err := kv.Put(key, []byte(value))
+		expectOk(t, err)
+	}
+
+	put("foo", "foo1")
+	put("bar", "bar1")
+	put("foo", "foo2")
+	err = kv.Delete("foo")
+	expectOk(t, err)
+
+	time.Sleep(200 * time.Millisecond)
+
+	err = kv.Delete("bar")
+	expectOk(t, err)
+
+	err = kv.PurgeDeletes()
+	expectOk(t, err)
+
+	// The key foo should have been completely cleared of the data
+	// and the delete marker.
+	fooEntries, err := kv.History("foo")
+	if err != nats.ErrKeyNotFound {
+		t.Fatalf("Expected all entries for key foo to be gone, got err=%v entries=%v", err, fooEntries)
+	}
+	barEntries, err := kv.History("bar")
+	expectOk(t, err)
+	if len(barEntries) != 1 {
+		t.Fatalf("Expected 1 entry, got %v", barEntries)
+	}
+	if e := barEntries[0]; e.Operation() != nats.KeyValueDelete {
+		t.Fatalf("Unexpected entry: %+v", e)
 	}
 }
 
