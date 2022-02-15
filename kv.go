@@ -159,16 +159,6 @@ type KeyValueConfig struct {
 	MaxBytes     int64
 	Storage      StorageType
 	Replicas     int
-
-	// This is for the maintenance PurgeDeletes() function. Normally, when
-	// this function is invoked, keys that have a delete or purge marker
-	// as the last entry see all their entries removed, including the
-	// marker. This option allows to delete old data but keep the marker
-	// if its timestamp is not older than this value. If this option
-	// is not specified, the API will pick a default of 30 minutes.
-	// Explicitly set it to a negative value to restore previous behavior
-	// to delete markers, regardless their age.
-	PurgeDeletesMarkerThreshold time.Duration
 }
 
 // Used to watch all keys.
@@ -334,7 +324,6 @@ func (js *js) CreateKeyValue(cfg *KeyValueConfig) (KeyValue, error) {
 		stream: scfg.Name,
 		pre:    fmt.Sprintf(kvSubjectsPreTmpl, cfg.Bucket),
 		js:     js,
-		pdthr:  cfg.PurgeDeletesMarkerThreshold,
 	}
 	return kv, nil
 }
@@ -560,6 +549,7 @@ func (kv *kvs) PurgeDeletes(opts ...WatchOpt) error {
 	defer watcher.Stop()
 
 	var limit time.Time
+	// We are not exposing the option for now, but allow tests to set it...
 	olderThan := kv.pdthr
 	// Negative value is used to instruct to always remove markers, regardless
 	// of age. If set to 0 (or not set), use our default value.
